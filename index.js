@@ -20,14 +20,21 @@ const parameters = {
     restricted: false,
     maxLengthAll: 600, // max length of song for everyone is 10 minutes (600 seconds)
     maxLengthStaff: 3600, // max length of song for staff level 3 is 1 hour (3600 seconds)
+    playlistLimit: 100, // max number of search queries stored in a single user's playlist
 };
-
 
 let options = {
     key: fs.readFileSync( 'key.pem' ),
     cert: fs.readFileSync( 'crt.pem' )
 };
 
+let playlists;
+try {
+    playlists = JSON.parse(fs.readFileSync('playlists.json', "utf8"));
+} catch(err) {
+    playlists = {};
+    fs.writeFileSync('playlists.json', JSON.stringify(playlists));
+}
 
 
 let onInit = function() {
@@ -74,6 +81,10 @@ let parseCommand = function(message, user, scope) {
     }
 };
 
+////////////////////////////////
+///////   BOT COMMANDS   ///////
+////////////////////////////////
+
 
 let addStaff = function(params, user, scope) {
     if(!checkStaff(user.name, 2)) return userMessage(user, "<br>Only staff members level 2 or lower can add staff.");
@@ -100,6 +111,20 @@ let addStaff = function(params, user, scope) {
     }
     saveStaff(parameters.staff, "staff.json");
     channelMessage(userNameToAdd + " was added to staff at level " + levelToAdd);
+}
+
+let addToPlaylist = function(params, user, scope) {
+    if(!checkStaff(user.name, 3) && parameters.restricted) return userMessage(user, "Only staff may add songs to playlist while bot is in restricted mode.");
+    let requests = params.split(","),
+        requestsLength = requests.length,
+        userPlaylist = playlists[user.name] || [],
+        playlistLength = userPlaylist.length; 
+    if(requestsLength === 0) return userMessage(user, "No search terms found in your request.");
+    if(requestsLength > 100 || (playlistLength + requestsLength) > 100) return userMessage(user, "The maximum number of items in a playlist is " + parameters.playlistLimit);
+    userPlaylist = userPlaylist.concat(requests);
+    playlists[user.name] = userPlaylist;
+    userMessage(user, "Added " + requestsLength + " item" + (requestsLength===1 ? "" : "s") + " to your playlist.");
+    savePlaylists();
 }
 
 let addToQueue = function(request) {
@@ -131,15 +156,50 @@ let checkBanned = function(username) {
     return (parameters.banned.includes(username))
 }
 
+let checkPlaylists = async function() {
+    let plist,
+        inQueue,
+        searchterm,
+        finished;
+    for(let user in playlists) {
+        plist = playlists[user];
+        inQueue = false;
+        queue.forEach(request => {
+            if(request.username === user) {
+                inQueue = true;
+            }
+        });
+        if(inQueue) continue;
+        searchterm = plist.shift();
+        if(searchterm) {
+            finished = await searchYT({name: user, id: "playlist"}, searchterm);
+        } else {
+            delete(playlists[user]);
+        }
+        savePlaylists();
+    }
+    return finished;
+}
+
 let checkQueue = function() {
-    if(parameters.isPlaying || queue.length == 0) return
-    playNext(queue[0]);
-    queue.shift();
+    checkPlaylists().then(() => {
+        if(parameters.isPlaying || queue.length == 0) return
+        playNext(queue[0]);
+        queue.shift();
+    });
 }
 
 let checkStaff = function(username, level) {
     let staffUser = parameters.staff[username]
     return (staffUser && staffUser.level <= level)
+}
+
+let clearPlaylist = function(params, user, scope) {
+    if(!checkStaff(user.name, 2) && params !== "") return userMessage(user, "Only staff level 2 or lower can clear other users' playlists.");
+    let userNameToRemove = params === "" ? user.name : params;
+    delete(playlists[userNameToRemove]);
+    savePlaylists();
+    channelMessage("<b>" + userNameToRemove + "</b>'s playlist was cleared.");
 }
 
 let displayCurrent = function(params, user, scope) {
@@ -289,7 +349,7 @@ let removeBan = function(params, user, scope) {
     channelMessage(userNameToUnban + " was removed from the ban list.");
 }
 
-let removeSong = function(params, user, scopre) {
+let removeSong = function(params, user, scope) {
     if(!checkStaff(user.name, 3) && parameters.restricted) return userMessage(user, "Only staff can remove songs from the queue when the bot is in restricted mode.");
     if(!checkStaff(user.name, 2) && params !== "") return userMessage(user, "Only staff level 2 or lower can remove other users' songs from the queue.");
     if(queue.length === 0) return channelMessage("Queue is empty.");
@@ -338,6 +398,9 @@ let removeStaff = function(params, user, scope) {
 }
 
 let requestSong = function(params, user, scope) {
+    return channelMessage("<br><font style=\"color: red\">The !request command is deprecated. Please use !add instead, which creates a personal playlist for you. \
+Songs on your playlist will be added to the queue one at a time in the order you added them. Look at my comment for \
+other playlist commands.</font>");
     if(parameters.restricted && !checkStaff(user.name, 3)) {
         userMessage(user, "<br>Must be a member of the staff to add songs when the bot is in restricted mode.");
         return;
@@ -375,37 +438,44 @@ let saveBanned = function(banned, bannedFile) {
     fs.writeFileSync(bannedFile, JSON.stringify(banned));
 }
 
+let savePlaylists = function() {
+    fs.writeFileSync('playlists.json', JSON.stringify(playlists));
+}
+
 let saveStaff = function(staff, staffFile) {
     fs.writeFileSync(staffFile, JSON.stringify(staff));
 }
 
 let searchYT = function(user, term) {
-    if(parameters.YTKey === "") return console.log("No YouTube API Key defined.");
-    let opts = {
-        maxResults: 1,
-        key: parameters.YTKey,
-        type: "video"
-    }
-    search(term, opts, (err, results) => {
-        if(err) return console.log(err)
-        console.log(results);
-        if(results[0].kind !== 'youtube#video') return channelMessage("Search did not return a video. Try again.");
-        let request = {
-            username: user.name,
-            userID: user.id,
-            id: results[0].id,
-            title: results[0].title,
-            images: {
-                small: results[0].thumbnails.default.url,
-                medium: results[0].thumbnails.medium.url,
-                large: results[0].thumbnails.high.url
-            }
-        };
-        duration(request.id, parameters.YTKey).then(dur => {
-            request.dur = dur;
-            if(!isTooLong(user, request)) {
-                addToQueue(request)                
-            }
+    return new Promise((resolve, reject) => {
+        if(parameters.YTKey === "") return console.log("No YouTube API Key defined.");
+        let opts = {
+            maxResults: 1,
+            key: parameters.YTKey,
+            type: "video"
+        }
+        search(term, opts, (err, results) => {
+            if(err) return console.log(err)
+            console.log(results);
+            if(results[0].kind !== 'youtube#video') return channelMessage("Search did not return a video. Try again.");
+            let request = {
+                username: user.name,
+                userID: user.id,
+                id: results[0].id,
+                title: results[0].title,
+                images: {
+                    small: results[0].thumbnails.default.url,
+                    medium: results[0].thumbnails.medium.url,
+                    large: results[0].thumbnails.high.url
+                }
+            };
+            duration(request.id, parameters.YTKey).then(dur => {
+                request.dur = dur;
+                if(!isTooLong(user, request)) {
+                    addToQueue(request)                
+                }
+                resolve(true);
+            });
         });
     });
 }
@@ -420,6 +490,13 @@ let setBitrate = function(bitrate, user, scope) {
 
 let setComment = function(commentText) {
     conn.user.setComment(commentText);
+}
+
+let showPlaylist = function(params, user, scope) {
+    let userName = params === "" ? user.name : params,
+        plist = playlists[userName];
+    if(!plist || plist.length === 0) return userMessage(user, userName + "'s playlist is empty.");
+    userMessage(user, plist.join(', '));
 }
 
 let showQueue = function(params, user, scope) {
@@ -497,9 +574,70 @@ let volume = function(params, user, scope) {
 
 
 
+let playerCommands = {
+    add: {
+        exec: addToPlaylist,
+        arguments: "SEARCHTERM(s)",
+        description: 'adds <font face="courier"><b>SEARCHTERM</b></font> to your personal playlist. Terms in your playlist will be added to the play queue in order. Multiple terms may be added by separating them with commas.'
+    },
+    clear: {
+        exec: clearPlaylist,
+        arguments: "USER",
+        description: 'Removes all entries from <font face="courier"><b>USER</b></font>\'s playlist. Call without an argument to clear own playlist.'
+    },
+    pause: {
+        exec: pause,
+        arguments: "",
+        description: "pause the currently playing track"
+    },
+    playing: {
+        exec: displayCurrent,
+        arguments: "",
+        description: "displays information about the currently playing song"
+    },
+    queue: {
+        exec: showQueue,
+        arguments: "",
+        description: "displays the current queue"
+    },
+    request: {
+        exec: requestSong,
+        arguments: "SEARCHTERM",
+        description: 'DEPRECATED: Please use !add instead.'
+    },
+    resume: {
+        exec: resume,
+        arguments: "",
+        description: "unpause a currently paused track"
+    },
+    showplaylist: {
+        exec: showPlaylist,
+        arguments: "USER",
+        description: 'lists the contents of <font face="courier"><b>USER</b></font>\'s playlist. Call without an argument to list own playlist.'
+    },
+    skip: {
+        exec: skip,
+        arguments: "",
+        description: "Skips the current song."
+    },
+    stop: {
+        exec: stop,
+        arguments: "",
+        description: "Stops playing and clears the queue"
+    },
+    unqueue: {
+        exec: removeSong,
+        arguments: "USER",
+        description: 'Removes <font face="courier"><b>USER</b></font>\'s song from the queue. Call without an argument to remove own song.'
+    },
+    volume: {
+        exec: volume,
+        arguments: "NEWVOLUME",
+        description: "Sets the volume of the bot. Call without an argument to show the current volume"
+    }
+}
 
-
-let commands = {
+let staffCommands = {
     addstaff: {
         exec: addStaff,
         arguments: "USER LEVEL",
@@ -520,79 +658,43 @@ let commands = {
         arguments: "",
         description: "moves the bot to the room you're in"
     },
-    pause: {
-        exec: pause,
-        arguments: "",
-        description: "pause the currently playing track"
-    },
-    playing: {
-        exec: displayCurrent,
-        arguments: "",
-        description: "displays information about the currently playing song"
-    },
-    queue: {
-        exec: showQueue,
-        arguments: "",
-        description: "displays the current queue"
-    },
     removestaff: {
         exec: removeStaff,
         arguments: "USER",
         description: 'removes the <font face="courier"><b>USER</b></font> from the staff list'
-    },
-    request: {
-        exec: requestSong,
-        arguments: "SEARCHTERM",
-        description: 'searches YouTube for <font face="courier"><b>SEARCHTERM</b></font> and adds the result to the play queue'
     },
     restrict: {
         exec: restrict,
         arguments: "",
         description: "Toggles the bot's restrict mode. Non-staff cannot interact with the bot in restrict mode."
     },
-    resume: {
-        exec: resume,
-        arguments: "",
-        description: "unpause a currently paused track"
-    },
-    skip: {
-        exec: skip,
-        arguments: "",
-        description: "Skips the current song."
-    },
     staff: {
         exec: listStaff,
         arguments: "",
         description: "Lists the current staff members, their levels, and their ranks"
-    },
-    stop: {
-        exec: stop,
-        arguments: "",
-        description: "Stops playing and clears the queue"
     },
     unban: {
         exec: removeBan,
         arguments: "USER",
         description: 'Removes <font face="courier"><b>USER</b></font> from the list of banned users'
     },
-    unqueue: {
-        exec: removeSong,
-        arguments: "USER",
-        description: 'Removes <font face="courier"><b>USER</b></font>\'s song from the queue. Call without an argument to remove own song.'
-    },
-    volume: {
-        exec: volume,
-        arguments: "NEWVOLUME",
-        description: "Sets the volume of the bot. Call without an argument to show the current volume"
-    }
 }
 
-let comment = '<span style="color:#fc3bfc;font-size:xx-large">Commands</span><br><br>';
+let commands = Object.assign({}, playerCommands, staffCommands);
+
+let comment = '<span style="color:#fc3bfc;font-size:xx-large">Player Commands</span><br>';
     comment += '<table style="width:100%"><tr><th>Command</th><th>Arguments</th><th>Description</th></tr>'
-for(command in commands) {
+for(command in playerCommands) {
     comment += '<tr><td>' + '!' + command + '</td>';
     comment += '<td><font face="courier"><b>' + commands[command].arguments + '</b></font></td>';
     comment += '<td>' + commands[command].description + '</td></tr>'
+}
+    comment += '</table><br><span style="color:#fc3bfc;font-size:xx-large">Other Commands</span><br>';
+    comment += '<table style="width:100%"><tr><th>Command</th><th>Arguments</th><th>Description</th></tr>'
+for(command in staffCommands) {
+    comment += '<tr><td>' + '!' + command + '</td>';
+    comment += '<td><font face="courier"><b>' + commands[command].arguments + '</b></font></td>';
+    comment += '<td>' + commands[command].description + '</td></tr>'    
 }
 
 
