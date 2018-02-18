@@ -1,11 +1,18 @@
 
-const mumble = require('mumble'),
+const {promisify} = require('util');
+    mumble = require('./mumble_modified'),
     fs = require('fs'),
     //youtubeStream = require('youtube-audio-stream'),
     youtubeStream = require('./yas_modified2.js'),
     Decoder = require('lame').Decoder,
-    search = require('youtube-search'),
-    duration = require('./YT_duration.js');
+    search = promisify(require('youtube-search')),
+    duration = require('./YT_duration.js'),
+    shuffle = require('shuffle-array'),
+    Messenger = require('./ttoc_messenger.js'),
+    submission = Messenger.submission,
+    handleTree = Messenger.handleTree,
+    GM = require('./groupme_bot.js'),
+    startListener = GM.startListener;
 
 const parameters = {
     server: "mumble.koalabeast.com",
@@ -17,6 +24,7 @@ const parameters = {
     banned: JSON.parse(fs.readFileSync('banned.json', "utf8")),
     staff: JSON.parse(fs.readFileSync('staff.json', "utf8")),
     log: fs.createWriteStream("logfile.txt", {flags:'a'}),
+    feelGood: JSON.parse(fs.readFileSync('feelGood.json', "utf8")),
     restricted: false,
     maxLengthAll: 600, // max length of song for everyone is 10 minutes (600 seconds)
     maxLengthStaff: 3600, // max length of song for staff level 3 is 1 hour (3600 seconds)
@@ -37,6 +45,7 @@ try {
 }
 
 
+
 let onInit = function() {
     process.env.TZ = "America/New_York"
     console.log( 'Connection initialized' );
@@ -45,7 +54,12 @@ let onInit = function() {
     stream = conn.inputStream();
     conn.connection.setBitrate(48000);
     setComment(comment);
-    setInterval(checkQueue, 1000);
+
+    checkQueue();
+
+    // start groupme bot things
+    startListener();
+    GM.checkGroup();
 };
 
 let onVoice = function( voice ) {
@@ -55,10 +69,11 @@ let onVoice = function( voice ) {
 };
 
 let onMessage = function(message, user, scope ) {
-     parseCommand(message, user, scope);
+    parseCommand(message, user, scope);
 };
 
 let parseCommand = function(message, user, scope) {
+    if(scope !== "channel" && scope !== "private") return handleTree(message, user, scope);
     if (!parameters.commandChars.includes(message[0])) return;
     if(checkBanned(user.name)) {
         userMessage(user.name, "<br>You are banned from using this bot.");
@@ -120,17 +135,19 @@ let addToPlaylist = function(params, user, scope) {
         userPlaylist = playlists[user.name] || [],
         playlistLength = userPlaylist.length; 
     if(requestsLength === 0) return userMessage(user, "No search terms found in your request.");
-    if(requestsLength > 100 || (playlistLength + requestsLength) > 100) return userMessage(user, "The maximum number of items in a playlist is " + parameters.playlistLimit);
+    if(requestsLength > parameters.playlistLimit || (playlistLength + requestsLength) > parameters.playlistLimit) return userMessage(user, "The maximum number of items in a playlist is " + parameters.playlistLimit);
     userPlaylist = userPlaylist.concat(requests);
     playlists[user.name] = userPlaylist;
     userMessage(user, "Added " + requestsLength + " item" + (requestsLength===1 ? "" : "s") + " to your playlist.");
     savePlaylists();
 }
 
-let addToQueue = function(request) {
+let addToQueue = function(user, request) {
     let numSongs = queue.length;
-    channelMessage("<br>Added " + request.title + " to queue." + "<br>Duration: " + request.dur.formatted + "<br>Requested by " + request.username + "<br>There are " + numSongs + " ahead of yours.");
+    console.log(user.name);
+    userMessage(user, "<br>Added " + request.title + " to queue." + "<br>Duration: " + request.dur.formatted + "<br>There " + (numSongs === 1 ? "is " : "are ") + numSongs + (numSongs === 1 ? " song" : " songs") + " ahead of yours.");
     queue.push(request);
+    return true;
 }
 
 let banUser = function(params, user, scope) {
@@ -160,21 +177,23 @@ let checkPlaylists = async function() {
     let plist,
         inQueue,
         searchterm,
-        finished;
-    for(let user in playlists) {
-        plist = playlists[user];
+        finished,
+        user;
+    for(let username in playlists) {
+        plist = playlists[username];
         inQueue = false;
         queue.forEach(request => {
-            if(request.username === user) {
+            if(request.username === username) {
                 inQueue = true;
             }
         });
         if(inQueue) continue;
         searchterm = plist.shift();
         if(searchterm) {
-            finished = await searchYT({name: user, id: "playlist"}, searchterm);
+            user = conn.userByName(username);
+            finished = await searchYT(user || {name: username, id: "playlist"}, searchterm);
         } else {
-            delete(playlists[user]);
+            delete(playlists[username]);
         }
         savePlaylists();
     }
@@ -183,9 +202,13 @@ let checkPlaylists = async function() {
 
 let checkQueue = function() {
     checkPlaylists().then(() => {
-        if(parameters.isPlaying || queue.length == 0) return
-        playNext(queue[0]);
-        queue.shift();
+        if(parameters.isPlaying || stream._writableState.writing) {
+            if(conn.user.channel.users.length < 2) stop("", conn.user, null);
+        } else if(queue.length != 0) {
+            playNext(queue[0]);
+            queue.shift();
+        }
+        setTimeout(checkQueue, 1000);
     });
 }
 
@@ -195,7 +218,7 @@ let checkStaff = function(username, level) {
 }
 
 let clearPlaylist = function(params, user, scope) {
-    if(!checkStaff(user.name, 2) && params !== "") return userMessage(user, "Only staff level 2 or lower can clear other users' playlists.");
+    if(!checkStaff(user.name, 3) && params !== "") return userMessage(user, "Only staff members can clear other users' playlists.");
     let userNameToRemove = params === "" ? user.name : params;
     delete(playlists[userNameToRemove]);
     savePlaylists();
@@ -207,6 +230,13 @@ let displayCurrent = function(params, user, scope) {
     if(!checkStaff(user.name, 3) && parameters.restricted) return userMessage(user, "Only staff may request current song while bot is in restricted mode.");
     let prefix = parameters.paused ? '<br><font color="red"><b>PAUSED: </b></font>' : '<br>Currently playing ';
     channelMessage(prefix + currentSong.title + "<br>Duration: " + currentSong.dur.formatted + '<br>Requested by ' + currentSong.username + '<br><img src = "' + currentSong.images.small + '"></img>');
+}
+
+let feelGood = function(params, user, scope) {
+    if(!checkStaff(user.name, 3) && parameters.restricted) return userMessage(user, "Only staff members may feel good while the bot is in restricted mode.");
+    let thisRequest = shuffle(parameters.feelGood).slice(0, 100).join(', ');
+    addToPlaylist(thisRequest, conn.user, null);
+    return
 }
 
 let findMaxRank = function(staff) {
@@ -253,6 +283,12 @@ let getAudio = function (id) {
     console.log(exception);
     console.log(id + " is not a valid id");
   }
+}
+
+let gmAnnouncement = function(params, user, scope) {
+    if(checkStaff(user.name, 1)) {
+        GM.sendMessages(params);
+    }
 }
 
 let isSuperior = function(actor, recipient) {
@@ -450,12 +486,12 @@ let searchYT = function(user, term) {
     return new Promise((resolve, reject) => {
         if(parameters.YTKey === "") return console.log("No YouTube API Key defined.");
         let opts = {
-            maxResults: 1,
-            key: parameters.YTKey,
-            type: "video"
-        }
-        search(term, opts, (err, results) => {
-            if(err) return console.log(err)
+                maxResults: 1,
+                key: parameters.YTKey,
+                type: "video"
+            };
+        search(term, opts)
+        .then(results => {
             console.log(results);
             if(results[0].kind !== 'youtube#video') return channelMessage("Search did not return a video. Try again.");
             let request = {
@@ -472,7 +508,7 @@ let searchYT = function(user, term) {
             duration(request.id, parameters.YTKey).then(dur => {
                 request.dur = dur;
                 if(!isTooLong(user, request)) {
-                    addToQueue(request)                
+                    addToQueue(user, request)                
                 }
                 resolve(true);
             });
@@ -496,7 +532,7 @@ let showPlaylist = function(params, user, scope) {
     let userName = params === "" ? user.name : params,
         plist = playlists[userName];
     if(!plist || plist.length === 0) return userMessage(user, userName + "'s playlist is empty.");
-    userMessage(user, plist.join(', '));
+    userMessage(user, plist.join('<br>'));
 }
 
 let showQueue = function(params, user, scope) {
@@ -543,6 +579,8 @@ let stop = function(params, user, scope) {
         return;
     }
     queue = [];
+    playlists = {};
+    savePlaylists();
     decoder.end();
     stream.end();
     ytStream.ffmpeg.kill();
@@ -561,13 +599,13 @@ let volume = function(params, user, scope) {
         return;
     }
     let newGain = gain,
-        newVolume = Number(params);
-    if(params === "") return channelMessage("Volume is " + newGain);
-    if(isNaN(newVolume)) return channelMessage("Use !volume <i>new volume</i> to set volume between 0 and 1");
+        newVolume = Number(params) / 100;
+    if(params === "") return channelMessage("Volume is " + newGain*100);
+    if(isNaN(newVolume)) return channelMessage("Use !volume <i>new volume</i> to set volume between 0 and 100");
 
     newGain = Math.max(0.01, Math.min(1, newVolume));
     console.log(newGain);
-    channelMessage("Volume is now " + newGain);
+    channelMessage("Volume is now " + newGain*100);
     stream.setGain(newGain);
     gain = newGain;    
 }
@@ -584,6 +622,11 @@ let playerCommands = {
         exec: clearPlaylist,
         arguments: "USER",
         description: 'Removes all entries from <font face="courier"><b>USER</b></font>\'s playlist. Call without an argument to clear own playlist.'
+    },
+    feelgood: {
+        exec: feelGood,
+        arguments: "",
+        description: "when you need a lift"
     },
     pause: {
         exec: pause,
@@ -623,7 +666,7 @@ let playerCommands = {
     stop: {
         exec: stop,
         arguments: "",
-        description: "Stops playing and clears the queue"
+        description: "Stops playing and clears the queue and all playlists."
     },
     unqueue: {
         exec: removeSong,
@@ -666,7 +709,7 @@ let staffCommands = {
     restrict: {
         exec: restrict,
         arguments: "",
-        description: "Toggles the bot's restrict mode. Non-staff cannot interact with the bot in restrict mode."
+        description: "Toggles the bot's restricted mode. Non-staff cannot interact with the bot in restricted mode."
     },
     staff: {
         exec: listStaff,
@@ -683,23 +726,24 @@ let staffCommands = {
 let commands = Object.assign({}, playerCommands, staffCommands);
 
 let comment = '<span style="color:#fc3bfc;font-size:xx-large">Player Commands</span><br>';
-    comment += '<table style="width:100%"><tr><th>Command</th><th>Arguments</th><th>Description</th></tr>'
+    comment += '<table style="width:100%"><tr><th>Command</th><th>Arguments</th><th>Description</th></tr>';
 for(command in playerCommands) {
     comment += '<tr><td>' + '!' + command + '</td>';
     comment += '<td><font face="courier"><b>' + commands[command].arguments + '</b></font></td>';
-    comment += '<td>' + commands[command].description + '</td></tr>'
+    comment += '<td>' + commands[command].description + '</td></tr>';
 }
     comment += '</table><br><span style="color:#fc3bfc;font-size:xx-large">Other Commands</span><br>';
-    comment += '<table style="width:100%"><tr><th>Command</th><th>Arguments</th><th>Description</th></tr>'
+    comment += '<table style="width:100%"><tr><th>Command</th><th>Arguments</th><th>Description</th></tr>';
 for(command in staffCommands) {
     comment += '<tr><td>' + '!' + command + '</td>';
     comment += '<td><font face="courier"><b>' + commands[command].arguments + '</b></font></td>';
-    comment += '<td>' + commands[command].description + '</td></tr>'    
+    comment += '<td>' + commands[command].description + '</td></tr>';    
 }
 
 
 // Hidden commands
 commands.setbitrate = {exec: setBitrate};
+commands.announce = {exec: gmAnnouncement};
 
 
 let conn,

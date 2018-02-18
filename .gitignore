@@ -1,0 +1,15 @@
+node_modules/
+testing/
+banned.json
+groupme_auth.txt
+logfile.txt
+playlists.json
+reddit_credentials.json
+staff.json
+submission.json
+usersToMessage.json
+YTKey.txt
+package*json
+*.pem
+*.p12
+*.sh
