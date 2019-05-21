@@ -18,8 +18,7 @@ try {
 }
 
 let tds = new TurndownService(),
-    subreddit = "TagPro",
-    submissionFile = fs.createWriteStream("submission.json");
+    subreddit = "TagPro";
 
 
 /*
@@ -42,10 +41,11 @@ let newSubmission = function() {
                   "\n* Filling that out signs you up to be in the tournament draft. \n* Captains will take turns choosing players for their teams during the draft. You can see " +
                   "this process happening live on the spreadsheet that is also linked in the comments. \n* You should get onto Mumble during the draft and then join the **Tournaments** " +
                   "room. Someone will help you find the room for your team after the draft is done." +
-                  "\n\nTournaments follow different structures depending on the number of people who sign up, but they are generally single-elimination (sometimes best of 3)." +
+                  "\n\nTournaments follow different structures depending on the number of people who sign up." +
                   "\n\nIf you have any questions, send a reddit message to /u/Poeticalto or /u/Love_You_TP or ask people on Mumble." +
                   "\n\n----" +
-                  "\n\nIf you don't know how to access NA Mumble, please see this page for instructions: [wiki](https://www.reddit.com/r/TagPro/w/mumble)"
+                  "\n\nIf you don't know how to access NA Mumble, please see this page for instructions: [wiki](https://www.reddit.com/r/TagPro/w/mumble)" +
+                  "\n\n-----\n\nIf you want to receive messages like this sent to you on GroupMe, click [this link](https://groupme.com/join_group/42231940/UvWrqD) and then type 'start' in the group it links to."
 
     return r.getSubreddit(subreddit).submitSelfpost({title: title, text: message}).id.then(id => {
         return {
@@ -162,9 +162,9 @@ let handleTree = function(message, user, scope) {
     if(!submissionInfo || !submissionInfo.time || (Date.now() - submissionInfo.time) > (24 * 60 * 60 * 1000)) {
         newSubmission().then(subInfo => {
             submissionInfo = subInfo;
-            submissionFile.write(JSON.stringify(submissionInfo));
+            fs.writeFileSync('submission.json', JSON.stringify(submissionInfo));
             replyToSubmission(submissionInfo.id, newMessage);
-        })
+        });
     } else {
         replyToSubmission(submissionInfo.id, newMessage);
     }

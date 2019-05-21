@@ -1,4 +1,6 @@
 
+console.log('Running version 1.0');
+
 const {promisify} = require('util');
     mumble = require('./mumble_modified'),
     fs = require('fs'),
@@ -12,7 +14,8 @@ const {promisify} = require('util');
     submission = Messenger.submission,
     handleTree = Messenger.handleTree,
     GM = require('./groupme_bot.js'),
-    startListener = GM.startListener;
+    startListener = GM.startListener,
+    checkGroup = GM.checkGroup;
 
 const parameters = {
     server: "mumble.koalabeast.com",
@@ -25,6 +28,7 @@ const parameters = {
     staff: JSON.parse(fs.readFileSync('staff.json', "utf8")),
     log: fs.createWriteStream("logfile.txt", {flags:'a'}),
     feelGood: JSON.parse(fs.readFileSync('feelGood.json', "utf8")),
+    oneHitWonders: JSON.parse(fs.readFileSync('oneHitWonders.json', "utf8")),
     restricted: false,
     maxLengthAll: 600, // max length of song for everyone is 10 minutes (600 seconds)
     maxLengthStaff: 3600, // max length of song for staff level 3 is 1 hour (3600 seconds)
@@ -59,7 +63,7 @@ let onInit = function() {
 
     // start groupme bot things
     startListener();
-    GM.checkGroup();
+    //checkGroup();
 };
 
 let onVoice = function( voice ) {
@@ -76,7 +80,7 @@ let parseCommand = function(message, user, scope) {
     if(scope !== "channel" && scope !== "private") return handleTree(message, user, scope);
     if (!parameters.commandChars.includes(message[0])) return;
     if(checkBanned(user.name)) {
-        userMessage(user.name, "<br>You are banned from using this bot.");
+        userMessage(user, "<br>You are banned from using this bot.");
         return;
     }
     let cmd = message.substr(0, message.indexOf(' ')),
@@ -87,7 +91,7 @@ let parseCommand = function(message, user, scope) {
     }
     cmd = cmd.substr(1);
     if(cmd !== "move" && user.channel !== conn.user.channel) return;
-    if(!commands[cmd]) return channelMessage("!" + cmd + " is not a command.");
+    if(!commands[cmd]) return channelMessage(cmd + " is not a command.");
     try {
         log(user.name, user.id, scope, cmd, params);
         commands[cmd].exec(params, user, scope);
@@ -117,6 +121,11 @@ let addStaff = function(params, user, scope) {
     if(userLevel > levelToAdd || levelToAdd < 2) {
         userMessage(user, "You cannot add staff at level " + levelToAdd);
         return;
+    }
+
+    let currentStaff = parameters.staff[userNameToAdd];
+    if(currentStaff && isSuperior(user.name, userNameToAdd)) {
+        return userMessage(user, "You cannot alter senior staff members.");
     }
     
     let rankToAdd = findMaxRank(parameters.staff) + 1
@@ -213,8 +222,8 @@ let checkQueue = function() {
 }
 
 let checkStaff = function(username, level) {
-    let staffUser = parameters.staff[username]
-    return (staffUser && staffUser.level <= level)
+    let staffUser = parameters.staff[username];
+    return (staffUser && staffUser.level <= level);
 }
 
 let clearPlaylist = function(params, user, scope) {
@@ -229,13 +238,17 @@ let displayCurrent = function(params, user, scope) {
     if(!parameters.isPlaying) return channelMessage("Nothing is playing right now.");
     if(!checkStaff(user.name, 3) && parameters.restricted) return userMessage(user, "Only staff may request current song while bot is in restricted mode.");
     let prefix = parameters.paused ? '<br><font color="red"><b>PAUSED: </b></font>' : '<br>Currently playing ';
-    channelMessage(prefix + currentSong.title + "<br>Duration: " + currentSong.dur.formatted + '<br>Requested by ' + currentSong.username + '<br><img src = "' + currentSong.images.small + '"></img>');
+    channelMessage(prefix + currentSong.title + '<br>Duration: ' + currentSong.dur.formatted + 
+                                                '<br>Requested by ' + currentSong.username + 
+                                                '<br><img src = "' + currentSong.images.small + '"></img>' +
+                                                '<br><a href="https://www.youtube.com/watch?v=' + currentSong.id + '">Link</a>');
 }
 
 let feelGood = function(params, user, scope) {
     if(!checkStaff(user.name, 3) && parameters.restricted) return userMessage(user, "Only staff members may feel good while the bot is in restricted mode.");
     let thisRequest = shuffle(parameters.feelGood).slice(0, 100).join(', ');
     addToPlaylist(thisRequest, conn.user, null);
+    userMessage(user, "I've added 100 random feelgood songs to my queue. :)");
     return
 }
 
@@ -287,7 +300,7 @@ let getAudio = function (id) {
 
 let gmAnnouncement = function(params, user, scope) {
     if(checkStaff(user.name, 1)) {
-        GM.sendMessages(params);
+        GM.announcement(params);
     }
 }
 
@@ -345,8 +358,17 @@ let moveToUser = function(params, user, scope) {
     if(checkStaff(user.name, level)) {
         conn.user.moveToChannel(user.channel);
     } else {
-        userMessage("<br>Sorry, you must be a level " + level + " or lower staff member to move this bot.", user);
+        userMessage(user, "<br>Sorry, you must be a level " + level + " or lower staff member to move this bot.");
     }
+}
+
+let oneHitWonders = function(params, user, scope) {
+    if(!checkStaff(user.name, 3) && parameters.restricted) return userMessage(user, "Only staff members may use this while the bot is in restricted mode.");
+    let thisRequest = shuffle(parameters.oneHitWonders).slice(0, 100).join(', ');
+    console.log(thisRequest);
+    addToPlaylist(thisRequest, conn.user, null);
+    userMessage(user, "I've added 100 random one hit wonders to my queue. :)");
+    return
 }
 
 let pause = function(params, user, scope) {
@@ -457,7 +479,7 @@ let restrict = function(params, user, scope) {
         parameters.restricted = !parameters.restricted;
         channelMessage("restricted mode: " + (parameters.restricted ? "ON" : "OFF"));
     } else {
-        userMessage("<br>You must be a level 2 or lower staff member to set the bot's restricted status.")
+        userMessage(user, "<br>You must be a level 2 or lower staff member to set the bot's restricted status.")
     }
 }
 
@@ -492,26 +514,35 @@ let searchYT = function(user, term) {
             };
         search(term, opts)
         .then(results => {
-            console.log(results);
-            if(results[0].kind !== 'youtube#video') return channelMessage("Search did not return a video. Try again.");
-            let request = {
-                username: user.name,
-                userID: user.id,
-                id: results[0].id,
-                title: results[0].title,
-                images: {
-                    small: results[0].thumbnails.default.url,
-                    medium: results[0].thumbnails.medium.url,
-                    large: results[0].thumbnails.high.url
-                }
-            };
-            duration(request.id, parameters.YTKey).then(dur => {
-                request.dur = dur;
-                if(!isTooLong(user, request)) {
-                    addToQueue(user, request)                
-                }
-                resolve(true);
-            });
+            if(!results || results.length === 0) {
+                console.log('No video found');
+                userMessage(user, "Search did not return a video. Try again.");
+                resolve(false);
+            } else if(results[0] && results[0].kind !== 'youtube#video') {
+                console.log('Result was not a video.');
+                channelMessage("Search did not return a video. Try again.");
+                resolve(false);
+            } else {
+                console.log(results);
+                let request = {
+                    username: user.name,
+                    userID: user.id,
+                    id: results[0].id,
+                    title: results[0].title,
+                    images: {
+                        small: results[0].thumbnails.default.url,
+                        medium: results[0].thumbnails.medium.url,
+                        large: results[0].thumbnails.high.url
+                    }
+                };
+                duration(request.id, parameters.YTKey).then(dur => {
+                    request.dur = dur;
+                    if(!isTooLong(user, request)) {
+                        addToQueue(user, request)                
+                    }
+                    resolve(true);
+                });
+            }
         });
     });
 }
@@ -547,6 +578,13 @@ let showQueue = function(params, user, scope) {
     }
     channelMessage(message);
 }
+
+let shufflePlaylist = function(params, user, scope) {
+    let plist = playlists[user.name];
+    if(!plist || plist.length === 0) return userMessage(user, "Your playlist is empty.");
+    playlists[user.name] = shuffle(plist);
+    return userMessage(user, "I just shuffled your playlist like crazy.");
+} 
 
 let skip = function(params, user, scope) {
     if(parameters.restricted && !checkStaff(user.name, 3)) {
@@ -628,6 +666,11 @@ let playerCommands = {
         arguments: "",
         description: "when you need a lift"
     },
+    onehitwonders: {
+        exec: oneHitWonders,
+        arguments: "",
+        description: "add 100 random one hit wonder songs to the queue"
+    },
     pause: {
         exec: pause,
         arguments: "",
@@ -657,6 +700,11 @@ let playerCommands = {
         exec: showPlaylist,
         arguments: "USER",
         description: 'lists the contents of <font face="courier"><b>USER</b></font>\'s playlist. Call without an argument to list own playlist.'
+    },
+    shuffle: {
+        exec: shufflePlaylist,
+        arguments: "",
+        description: 'Randomly reorders the search terms in your playlist.'
     },
     skip: {
         exec: skip,

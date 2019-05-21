@@ -7,7 +7,6 @@ var Channel = require( './Channel' );
 var EventEmitter = require( 'events' ).EventEmitter;
 var util = require( './util' );
 
-
 /**
  * @summary Mumble client API
  *
@@ -465,9 +464,11 @@ MumbleClient.prototype._textMessage = function( data ) {
         } else if( data.channel_id.length ) { // A message to the channel
 
             this.emit( 'message', data.message, actor, 'channel' );
+
         } else if( data.tree_id.length ) { // A recursive message was sent
 
             this.emit( 'message', data.message, actor, data.tree_id);
+        
         }
     }
 };
